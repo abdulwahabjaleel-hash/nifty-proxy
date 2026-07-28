@@ -15,7 +15,7 @@ S = {
 cache = {'d': None, 't': 0}
 
 
-def session():
+def make_session():
     s = requests.Session()
     s.headers.update(S)
     s.get('https://www.nseindia.com', timeout=15)
@@ -27,50 +27,51 @@ def session():
     return s
 
 
+def get_nearest_expiry(s, symbol):
+    url = f'https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}'
+    r = s.get(url, timeout=12)
+    r.raise_for_status()
+    data = r.json()
+
+    # Try expiryDatesByInstrumentType first
+    expiry_map = data.get('expiryDatesByInstrumentType', {})
+    for key in expiry_map:
+        if expiry_map[key]:
+            return expiry_map[key][0]
+
+    # Fallback: top level expiryDates
+    dates = data.get('expiryDates', [])
+    if dates:
+        return dates[0]
+
+    # Fallback: strikePrices section
+    records = data.get('records', {})
+    dates2 = records.get('expiryDates', [])
+    if dates2:
+        return dates2[0]
+
+    raise Exception(f'No expiry found. Keys: {list(data.keys())}')
+
+
 def fetch(symbol):
     if cache['d'] and time.time() - cache['t'] < 55:
         return cache['d']
-    s = session()
-    errors = []
 
-    # Try v3 endpoint
-    try:
-        cr = s.get(f'https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}', timeout=12)
-        if cr.status_code == 200:
-            expiry = None
-            for k, v in cr.json().get('expiryDatesByInstrumentType', {}).items():
-                if v:
-                    expiry = v[0]
-                    break
-            if expiry:
-                r = s.get(f'https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol={symbol}&expiry={expiry}', timeout=15)
-                if r.status_code == 200:
-                    cache['d'] = r.json()
-                    cache['t'] = time.time()
-                    return cache['d']
-                errors.append(f'v3={r.status_code}')
-        else:
-            errors.append(f'contract={cr.status_code}')
-    except Exception as e:
-        errors.append(f'v3_err={e}')
+    s = make_session()
+    expiry = get_nearest_expiry(s, symbol)
 
-    # Try old endpoint
-    try:
-        r = s.get(f'https://www.nseindia.com/api/option-chain-indices?symbol={symbol}', timeout=15)
-        if r.status_code == 200:
-            cache['d'] = r.json()
-            cache['t'] = time.time()
-            return cache['d']
-        errors.append(f'old={r.status_code}')
-    except Exception as e:
-        errors.append(f'old_err={e}')
+    url = f'https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol={symbol}&expiry={expiry}'
+    r = s.get(url, timeout=15)
+    r.raise_for_status()
 
-    raise Exception(' | '.join(errors))
+    cache['d'] = r.json()
+    cache['t'] = time.time()
+    return cache['d']
 
 
 @app.route('/')
 def home():
-    return 'OK'
+    return 'NSE Proxy Running OK'
 
 
 @app.route('/nifty-oc')
@@ -81,22 +82,29 @@ def nifty():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/banknifty-oc')
+def banknifty():
+    try:
+        return jsonify(fetch('BANKNIFTY'))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/debug')
 def debug():
-    s = session()
-    out = {}
-    for label, url in [
-        ('homepage', 'https://www.nseindia.com'),
-        ('allIndices', 'https://www.nseindia.com/api/allIndices'),
-        ('contract_info', 'https://www.nseindia.com/api/option-chain-contract-info?symbol=NIFTY'),
-        ('old_endpoint', 'https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY'),
-    ]:
-        try:
-            r = s.get(url, timeout=10)
-            out[label] = r.status_code
-        except Exception as e:
-            out[label] = str(e)
-    return jsonify(out)
+    try:
+        s = make_session()
+        expiry = get_nearest_expiry(s, 'NIFTY')
+        url = f'https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY&expiry={expiry}'
+        r = s.get(url, timeout=15)
+        return jsonify({
+            'expiry_found': expiry,
+            'v3_status': r.status_code,
+            'data_keys': list(r.json().keys()) if r.status_code == 200 else [],
+            'strikes_count': len(r.json().get('records', {}).get('data', [])) if r.status_code == 200 else 0
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
