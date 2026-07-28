@@ -12,11 +12,6 @@ HEADERS = {
     'Connection': 'keep-alive',
     'Referer': 'https://www.nseindia.com/option-chain',
     'X-Requested-With': 'XMLHttpRequest',
-    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'same-origin',
 }
 
 _cache = {'data': None, 'ts': 0}
@@ -25,16 +20,23 @@ _cache = {'data': None, 'ts': 0}
 def init_session():
     s = requests.Session()
     s.headers.update(HEADERS)
-    # Step 1: Hit homepage to get initial cookies
     s.get('https://www.nseindia.com', timeout=12)
     time.sleep(1.5)
-    # Step 2: Hit option chain page to get session cookies
     s.get('https://www.nseindia.com/option-chain', timeout=12)
     time.sleep(1.0)
-    # Step 3: Hit market data page (extra cookie layer NSE needs)
-    s.get('https://www.nseindia.com/market-data/live-equity-market', timeout=10)
-    time.sleep(0.5)
     return s
+
+
+def get_expiry(session, symbol):
+    url = f'https://www.nseindia.com/api/option-chain-contract-info?symbol={symbol}'
+    r = session.get(url, timeout=12)
+    if r.status_code == 200:
+        data = r.json()
+        expiries = data.get('expiryDatesByInstrumentType', {})
+        for key in expiries:
+            if expiries[key]:
+                return expiries[key][0]
+    return None
 
 
 def get_data(symbol):
@@ -42,12 +44,32 @@ def get_data(symbol):
         return _cache['data']
 
     s = init_session()
-    url = f'https://www.nseindia.com/api/option-chain-indices?symbol={symbol}'
-    r = s.get(url, timeout=15)
-    r.raise_for_status()
-    _cache['data'] = r.json()
-    _cache['ts'] = time.time()
-    return _cache['data']
+
+    # Try NEW endpoint (option-chain-v3) first
+    try:
+        expiry = get_expiry(s, symbol)
+        if expiry:
+            url = f'https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol={symbol}&expiry={expiry}'
+            r = s.get(url, timeout=15)
+            if r.status_code == 200:
+                _cache['data'] = r.json()
+                _cache['ts'] = time.time()
+                return _cache['data']
+    except Exception as e:
+        print(f'v3 attempt failed: {e}')
+
+    # Fallback: Try OLD endpoint
+    try:
+        url = f'https://www.nseindia.com/api/option-chain-indices?symbol={symbol}'
+        r = s.get(url, timeout=15)
+        if r.status_code == 200:
+            _cache['data'] = r.json()
+            _cache['ts'] = time.time()
+            return _cache['data']
+    except Exception as e:
+        print(f'old endpoint failed: {e}')
+
+    raise Exception('Both NSE endpoints failed')
 
 
 @app.route('/')
