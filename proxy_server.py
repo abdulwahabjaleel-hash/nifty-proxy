@@ -1,8 +1,10 @@
 import time
 import requests
 from flask import Flask, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)  # This allows GitHub Pages to call Railway
 
 S = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -32,38 +34,28 @@ def get_nearest_expiry(s, symbol):
     r = s.get(url, timeout=12)
     r.raise_for_status()
     data = r.json()
-
-    # Try expiryDatesByInstrumentType first
     expiry_map = data.get('expiryDatesByInstrumentType', {})
     for key in expiry_map:
         if expiry_map[key]:
             return expiry_map[key][0]
-
-    # Fallback: top level expiryDates
     dates = data.get('expiryDates', [])
     if dates:
         return dates[0]
-
-    # Fallback: strikePrices section
     records = data.get('records', {})
     dates2 = records.get('expiryDates', [])
     if dates2:
         return dates2[0]
-
     raise Exception(f'No expiry found. Keys: {list(data.keys())}')
 
 
 def fetch(symbol):
     if cache['d'] and time.time() - cache['t'] < 55:
         return cache['d']
-
     s = make_session()
     expiry = get_nearest_expiry(s, symbol)
-
     url = f'https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol={symbol}&expiry={expiry}'
     r = s.get(url, timeout=15)
     r.raise_for_status()
-
     cache['d'] = r.json()
     cache['t'] = time.time()
     return cache['d']
@@ -100,7 +92,6 @@ def debug():
         return jsonify({
             'expiry_found': expiry,
             'v3_status': r.status_code,
-            'data_keys': list(r.json().keys()) if r.status_code == 200 else [],
             'strikes_count': len(r.json().get('records', {}).get('data', [])) if r.status_code == 200 else 0
         })
     except Exception as e:
